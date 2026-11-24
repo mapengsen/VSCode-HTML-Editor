@@ -2,3 +2,5 @@
 test/**
 .gitignore
 *.vsix
+
+/icon.png

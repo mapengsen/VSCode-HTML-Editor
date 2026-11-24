@@ -60,7 +60,7 @@
   "extensionKind": [
     "workspace"
   ],
-  "icon": "icon.png",
+  "icon": "media/marketplace-icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/mapengsen/VSCode-HTML-Editor.git"
