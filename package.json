@@ -1,5 +1,5 @@
 {
-  "name": "vscode-html-editor",
+  "name": "vscode-visual-html-designer",
   "displayName": "VSCode HTML Editor",
   "description": "Edit HTML visually alongside its source in Visual Studio Code.",
   "version": "0.1.2",
