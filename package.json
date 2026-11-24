@@ -1,0 +1,79 @@
+{
+  "name": "vscode-html-editor",
+  "displayName": "VSCode HTML Editor",
+  "description": "Edit HTML visually alongside its source in Visual Studio Code.",
+  "version": "0.1.2",
+  "publisher": "pengsen",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onCommand:htmlDesign.open"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "htmlDesign.open",
+        "title": "HTML Editor: Open Design View",
+        "icon": "$(preview)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "htmlDesign.open",
+          "when": "editorLangId == html",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "VSCode HTML Editor",
+      "properties": {
+        "htmlDesign.syncDelay": {
+          "type": "number",
+          "default": 300,
+          "minimum": 100,
+          "maximum": 2000,
+          "description": "Delay in milliseconds before visual changes are applied to the HTML source.",
+          "scope": "resource"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "diff": "^8.0.0",
+    "parse5": "^7.3.0"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.0.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mapengsen/VSCode-HTML-Editor.git"
+  },
+  "homepage": "https://github.com/mapengsen/VSCode-HTML-Editor#readme",
+  "bugs": {
+    "url": "https://github.com/mapengsen/VSCode-HTML-Editor/issues"
+  },
+  "keywords": [
+    "html",
+    "wysiwyg",
+    "visual editor",
+    "html editor",
+    "remote ssh"
+  ]
+}
