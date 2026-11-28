@@ -4,8 +4,10 @@ const { randomBytes } = require('node:crypto');
 const { diffChars } = require('diff');
 const { parseSource, escapeAttribute } = require('./html');
 const { printDocument } = require('./print');
+const { registerPowerPoint } = require('./powerpoint');
 
 function activate(context) {
+  registerPowerPoint(context);
   const panels = new Map();
   context.subscriptions.push(vscode.commands.registerCommand('htmlDesign.open', async () => {
     const document = vscode.window.activeTextEditor?.document;
