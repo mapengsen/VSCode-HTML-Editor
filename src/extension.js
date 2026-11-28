@@ -205,7 +205,8 @@ function shell(webview, media, outlineDepth) {
     '<nav id="outline" aria-label="Document outline">',
     '<div class="outline-scroll"><p id="outline-empty">No headings to show</p><ul id="outline-entries" class="outline-list"></ul></div></nav>',
     '<div id="outline-divider" role="separator" tabindex="0" aria-label="Outline width" aria-orientation="vertical" aria-controls="outline" title="Drag to resize the outline"></div>',
-    '<main id="canvas" aria-label="Design canvas"></main></div>',
+    '<main id="canvas" aria-label="Design canvas"></main>',
+    '<button id="paragraph-add" class="compact-tool" type="button" aria-label="Add a paragraph below" title="Add a paragraph below" hidden>+</button></div>',
     '<footer><span id="filename"></span>',
     '<div class="document-status"><span id="breadcrumb" aria-label="Element path">body</span><span id="status" role="status">Loading…</span></div>',
     '<div class="zoom-controls" role="group" aria-label="Page zoom">',
@@ -223,6 +224,8 @@ function shell(webview, media, outlineDepth) {
     '<script nonce="' + nonce + '" src="' + asset('resources.js') + '"></script>',
     '<script nonce="' + nonce + '" src="' + asset('heading-shortcuts.js') + '"></script>',
     '<script nonce="' + nonce + '" src="' + asset('html-outline.js') + '"></script>',
+    '<script nonce="' + nonce + '" src="' + asset('paragraph-insert.js') + '"></script>',
+    '<script nonce="' + nonce + '" src="' + asset('html-paste.js') + '"></script>',
     '<script nonce="' + nonce + '" src="' + asset('design.js') + '"></script></body></html>'
   ].join('\n');
 }

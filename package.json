@@ -2,7 +2,7 @@
   "name": "vscode-visual-html-designer",
   "displayName": "VSCode File Editor",
   "description": "Edit HTML visually and modify text in PowerPoint presentations in Visual Studio Code.",
-  "version": "0.2.12",
+  "version": "0.2.15",
   "publisher": "pengsen",
   "engines": {
     "vscode": "^1.85.0"

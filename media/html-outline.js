@@ -9,7 +9,7 @@ function createHeadingOutline(panel, toggle, divider, depth, saveDepth) {
   const collapsed = new WeakSet();
   let body;
   let entries = [];
-  let activeHeading;
+  let location;
   let activeButton;
   let pendingFrame;
   let drag;
@@ -90,7 +90,42 @@ function createHeadingOutline(panel, toggle, divider, depth, saveDepth) {
     toggle.setAttribute('aria-label', label);
     toggle.title = label;
     updateDivider();
+    if (!panel.hidden) activeButton?.scrollIntoView({ block: 'nearest' });
   });
+
+  function updateCurrent() {
+    let heading;
+    if (location && body?.contains(location)) {
+      // Headings are in document order. Find the last one at or before this node.
+      let start = 0;
+      let end = entries.length;
+      while (start < end) {
+        const middle = Math.floor((start + end) / 2);
+        const element = entries[middle].element;
+        const before = element === location || (element.compareDocumentPosition(location) & Node.DOCUMENT_POSITION_FOLLOWING);
+        if (before) start = middle + 1;
+        else end = middle;
+      }
+      heading = entries[start - 1];
+      for (let parent = heading?.parent; parent; parent = parent.parent) {
+        if (collapsed.has(parent.element)) heading = parent;
+      }
+    }
+    const link = heading?.link;
+    if (link === activeButton) return;
+    activeButton?.removeAttribute('aria-current');
+    activeButton = link;
+    if (link) {
+      link.setAttribute('aria-current', 'location');
+      if (!panel.hidden) link.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }
+
+  function setLocation(node) {
+    if (node === location) return;
+    location = node;
+    updateCurrent();
+  }
 
   function refresh() {
     const maxLevel = Number(depth.value);
@@ -102,23 +137,27 @@ function createHeadingOutline(panel, toggle, divider, depth, saveDepth) {
         : [];
     });
     if (headings.length === entries.length && headings.every(({ element, label }, index) =>
-      element === entries[index].element && label === entries[index].label)) return;
+      element === entries[index].element && label === entries[index].label)) {
+      updateCurrent();
+      return;
+    }
 
     entries = headings;
-    if (!headings.some(({ element }) => element === activeHeading)) activeHeading = undefined;
-    activeButton = undefined;
     const roots = [];
     const parents = [];
     for (const heading of headings) {
       while (parents.length && parents.at(-1).level >= heading.level) parents.pop();
-      (parents.at(-1)?.children || roots).push(heading);
+      heading.parent = parents.at(-1);
+      (heading.parent?.children || roots).push(heading);
       parents.push(heading);
     }
     list.replaceChildren(...roots.map(renderHeading));
     empty.hidden = Boolean(headings.length);
+    updateCurrent();
   }
 
-  function renderHeading({ element, label, children }) {
+  function renderHeading(heading) {
+    const { element, label, children } = heading;
     const item = document.createElement('li');
     const row = document.createElement('div');
     row.className = 'outline-row';
@@ -141,23 +180,20 @@ function createHeadingOutline(panel, toggle, divider, depth, saveDepth) {
         expand.setAttribute('aria-label', (expanded ? 'Collapse ' : 'Expand ') + label);
       }
       setExpanded(!collapsed.has(element));
-      expand.addEventListener('click', () => setExpanded(sublist.hidden));
+      expand.addEventListener('click', () => {
+        setExpanded(sublist.hidden);
+        updateCurrent();
+      });
     }
 
     const link = document.createElement('button');
     link.type = 'button';
     link.className = 'outline-link';
     link.textContent = link.title = label;
-    if (activeHeading === element) {
-      activeButton = link;
-      link.setAttribute('aria-current', 'location');
-    }
+    heading.link = link;
     link.addEventListener('click', () => {
       element.scrollIntoView({ block: 'start', inline: 'nearest' });
-      activeHeading = element;
-      activeButton?.removeAttribute('aria-current');
-      activeButton = link;
-      link.setAttribute('aria-current', 'location');
+      setLocation(element);
     });
     row.append(link);
     return item;
@@ -174,6 +210,7 @@ function createHeadingOutline(panel, toggle, divider, depth, saveDepth) {
   function attach(nextBody) {
     observer.disconnect();
     body = nextBody;
+    location = undefined;
     if (body) observer.observe(body, {
       subtree: true, childList: true, characterData: true, attributes: true,
       attributeFilter: ['hidden', 'aria-hidden']
@@ -181,5 +218,5 @@ function createHeadingOutline(panel, toggle, divider, depth, saveDepth) {
     refresh();
   }
 
-  return { attach };
+  return { attach, setLocation };
 }

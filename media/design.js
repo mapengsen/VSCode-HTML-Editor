@@ -1,4 +1,4 @@
-/* global acquireVsCodeApi, sourceTree, createResources, headingLevelForShortcut, createHeadingOutline */
+/* global acquireVsCodeApi, sourceTree, createResources, headingLevelForShortcut, createHeadingOutline, createParagraphInsert, matchingPaste */
 'use strict';
 
 const vscode = acquireVsCodeApi();
@@ -14,6 +14,7 @@ const minZoom = Number(zoomSlider.min);
 const maxZoom = Number(zoomSlider.max);
 const outline = createHeadingOutline(byId('outline'), byId('outline-toggle'), byId('outline-divider'),
   byId('outline-depth'), depth => vscode.postMessage({ type: 'outlineDepth', depth }));
+const paragraphInsert = createParagraphInsert(byId('paragraph-add'), canvas, paragraphAt, insertParagraphAfter);
 const blockSelector = 'p, h1, h2, h3, h4, h5, h6, blockquote, pre';
 const paragraphSizes = { p: 1, h1: 2, h2: 1.55, h3: 1.35, h4: 1.2, h5: 1.1, h6: 1.05 };
 
@@ -31,6 +32,7 @@ let queuedPrint = false;
 let queuedSource = false;
 let queuedSave = false;
 let selection;
+let outlinePointer;
 let loadingVersion = -1;
 let zoom = defaultZoom;
 let zoomStyle;
@@ -52,9 +54,11 @@ function displayDocument(message) {
   delay = message.delay;
   closeColorPicker();
   selection = undefined;
+  outlinePointer = undefined;
   readBody = undefined;
   zoomStyle = undefined;
   outline.attach(undefined);
+  paragraphInsert.attach(undefined);
   resources?.dispose();
   resources = createResources(message.baseUrl);
   acknowledgedBody = message.html.bodySource;
@@ -102,15 +106,27 @@ function displayDocument(message) {
     page.body.contentEditable = 'true';
     page.body.spellcheck = false;
     outline.attach(page.body);
+    paragraphInsert.attach(next);
 
     page.addEventListener('input', event => {
       if (!event.isComposing) schedule();
     });
     page.addEventListener('compositionend', schedule);
     page.addEventListener('selectionchange', rememberSelection);
+    page.addEventListener('pointermove', followOutlinePointer);
+    page.addEventListener('pointerout', event => {
+      if (!event.relatedTarget) outlinePointer = undefined;
+    });
+    page.addEventListener('scroll', () => {
+      if (outlinePointer) updateOutlineAtPointer(page.elementFromPoint(outlinePointer.x, outlinePointer.y));
+    }, true);
+    page.addEventListener('paste', pasteStyledText);
     page.addEventListener('pointerdown', closeColorPicker);
     page.addEventListener('click', event => followDocumentLink(event, documentUrl));
-    page.addEventListener('wheel', zoomWithWheel, { passive: false });
+    page.addEventListener('wheel', event => {
+      followOutlinePointer(event);
+      zoomWithWheel(event);
+    }, { passive: false });
     page.addEventListener('submit', event => event.preventDefault());
     page.addEventListener('keydown', useHeadingShortcut, true);
     page.addEventListener('keydown', requestSave);
@@ -131,6 +147,7 @@ function setZoom(value) {
   zoomInput.value = label;
   byId('zoom-out').disabled = zoom === minZoom;
   byId('zoom-in').disabled = zoom === maxZoom;
+  paragraphInsert.refresh();
 }
 
 function zoomWithWheel(event) {
@@ -194,11 +211,36 @@ function followDocumentLink(event, documentUrl) {
   else if (!name || name.toLowerCase() === 'top') owner.defaultView.scrollTo(0, 0);
 }
 
+function pasteStyledText(event) {
+  if (!readBody || conflict || !event.target.isContentEditable || event.target.closest('input, textarea, select')) return;
+  const html = event.clipboardData?.getData('text/html');
+  const current = page.getSelection();
+  if (!html || !current.rangeCount) return;
+  const node = current.getRangeAt(0).startContainer;
+  if (!page.body.contains(node)) return;
+  const block = paragraphAt(node);
+  let destination = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  if (block && !block.textContent.trim()) {
+    destination = [block.previousElementSibling, block.nextElementSibling]
+      .find(sibling => sibling?.matches('p, div') && sibling.textContent.trim()) || block;
+  }
+  const content = matchingPaste(page, html, page.defaultView.getComputedStyle(destination));
+  if (!content) return;
+  event.preventDefault();
+  if (page.execCommand('insertHTML', false, content)) {
+    rememberSelection();
+    schedule();
+  }
+}
+
 function rememberSelection() {
   if (!page) return;
   const current = page.getSelection();
   let node = current.anchorNode;
+  paragraphInsert.setCaret(current.isCollapsed ? paragraphAt(node) : undefined);
   if (!node || !page.body.contains(node)) return;
+  outlinePointer = undefined;
+  outline.setLocation(current.focusNode);
   if (current.rangeCount) selection = current.getRangeAt(0).cloneRange();
   const startStyle = paragraphAt(node)?.localName || 'p';
   const endStyle = paragraphAt(current.focusNode)?.localName || 'p';
@@ -212,8 +254,33 @@ function rememberSelection() {
   byId('breadcrumb').textContent = ['body', ...chain].join(' › ');
 }
 
+function followOutlinePointer(event) {
+  outlinePointer = { x: event.clientX, y: event.clientY };
+  updateOutlineAtPointer(event.target);
+}
+
+function updateOutlineAtPointer(node) {
+  if (!node) return;
+  const { x, y } = outlinePointer;
+  const text = page.caretRangeFromPoint?.(x, y)?.startContainer;
+  if (text && node.contains(text)) outline.setLocation(text);
+  else if (node !== page.body && node !== page.documentElement) outline.setLocation(node);
+}
+
 function paragraphAt(node) {
   return (node?.nodeType === 1 ? node : node?.parentElement)?.closest(blockSelector);
+}
+
+function insertParagraphAfter(block) {
+  if (!readBody || conflict || canvas.inert || !page.body.contains(block) || !block.isContentEditable) return;
+  const paragraph = page.createElement('p');
+  paragraph.append(page.createElement('br'));
+  block.after(paragraph);
+  page.body.focus({ preventScroll: true });
+  page.getSelection().collapse(paragraph, 0);
+  paragraph.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  rememberSelection();
+  schedule();
 }
 
 function updateParagraphMenu(value) {
@@ -556,7 +623,6 @@ const format = group();
 const paragraphMenu = select(format, 'Paragraph', [['Normal', 'p'], ['H1', 'h1'], ['H2', 'h2'], ['H3', 'h3'],
   ['H4', 'h4'], ['H5', 'h5'], ['H6', 'h6'], ['Quote', 'blockquote'], ['Code block', 'pre']], formatParagraph,
   { showCurrent: true, icon: 'H' });
-button(format, '', 'Normalize all H1–H5 headings', normalizeHeadings).classList.add('compact-tool', 'normalize-headings');
 select(format, 'Font', [['Arial', 'Arial'], ['Georgia', 'Georgia'], ['Times New Roman', 'Times New Roman'],
   ['Verdana', 'Verdana'], ['Courier New', 'Courier New'], ['System', 'system-ui']], value => command('fontName', value), { icon: 'Aa' });
 select(format, 'Size', [['10 px', '1'], ['13 px', '2'], ['16 px', '3'], ['18 px', '4'], ['24 px', '5'],
@@ -571,7 +637,7 @@ select(format, 'Size', [['10 px', '1'], ['13 px', '2'], ['16 px', '3'], ['18 px'
 const marks = group();
 for (const [label, title, action] of [['B', 'Bold', 'bold'], ['I', 'Italic', 'italic'],
   ['U', 'Underline', 'underline'], ['S', 'Strikethrough', 'strikeThrough']]) {
-  button(marks, label, title, () => command(action));
+  button(marks, label, title, () => command(action)).classList.add('compact-tool', 'toolbar-glyph', action);
 }
 const colorPicker = document.createElement('div');
 colorPicker.id = 'color-picker';
@@ -670,13 +736,14 @@ button(layout, '⇤', 'Decrease indent', () => command('outdent'));
 button(layout, '⇥', 'Increase indent', () => command('indent'));
 
 const insert = group();
-button(insert, 'Link', 'Insert link', () => {
+const linkButton = button(insert, '', 'Insert link', () => {
   const selected = selection?.toString() || '';
   dialogForm('Insert link', [{ label: 'URL', required: true }, { label: 'Text', value: selected }], (url, label) => {
     const href = allowedUrl(url);
     if (href) insertMarkup('a', { href }, label || href);
   });
 });
+linkButton.classList.add('compact-tool', 'toolbar-glyph', 'link-icon');
 button(insert, 'Image', 'Insert image', () => {
   dialogForm('Insert image', [{ label: 'URL or relative path', required: true }, { label: 'Alternative text' }], (url, alt) => {
     const src = allowedUrl(url, true);
@@ -698,6 +765,7 @@ button(insert, 'Table', 'Insert table', () => {
 });
 select(insert, 'Symbols', [...'©®™€£¥¢§¶°±×÷→←✓…—'].map(character => [character, character]),
   value => command('insertText', value));
+button(insert, '', 'Normalize all H1–H5 headings', normalizeHeadings).classList.add('compact-tool', 'normalize-headings');
 
 function openSourceDialog() {
   if (dialog.open) return;
