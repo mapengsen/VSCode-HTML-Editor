@@ -1,8 +1,8 @@
 {
   "name": "vscode-visual-html-designer",
-  "displayName": "VSCode HTML Editor",
+  "displayName": "VSCode File Editor",
   "description": "Edit HTML visually alongside its source in Visual Studio Code.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "pengsen",
   "engines": {
     "vscode": "^1.85.0"
@@ -33,7 +33,7 @@
       ]
     },
     "configuration": {
-      "title": "VSCode HTML Editor",
+      "title": "VSCode File Editor",
       "properties": {
         "htmlDesign.syncDelay": {
           "type": "number",
@@ -63,11 +63,11 @@
   "icon": "media/marketplace-icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mapengsen/VSCode-HTML-Editor.git"
+    "url": "https://github.com/mapengsen/VSCode-File-Editor.git"
   },
-  "homepage": "https://github.com/mapengsen/VSCode-HTML-Editor#readme",
+  "homepage": "https://github.com/mapengsen/VSCode-File-Editor#readme",
   "bugs": {
-    "url": "https://github.com/mapengsen/VSCode-HTML-Editor/issues"
+    "url": "https://github.com/mapengsen/VSCode-File-Editor/issues"
   },
   "keywords": [
     "html",
