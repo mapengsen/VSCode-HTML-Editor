@@ -74,6 +74,10 @@ class PowerPointProvider {
           this.edit(document, view, message.edits);
         } else if (message.type === 'format') {
           this.format(document, view, message);
+        } else if (message.type === 'insert') {
+          this.insert(document, view, message);
+        } else if (message.type === 'deleteObjects') {
+          this.deleteObjects(document, view, message);
         } else if (message.type === 'thumbnails' && Array.isArray(message.indices)) {
           for (const index of message.indices.slice(0, 40)) this.sendThumbnail(document, view, index);
         } else if (message.type === 'save') {
@@ -92,11 +96,50 @@ class PowerPointProvider {
     panel.webview.html = webviewHtml(panel.webview, this.media);
   }
 
-  sendSlide(document, view, resetThumbnails = false) {
+  sendSlide(document, view, resetThumbnails = false, selection) {
     const deck = document.presentation;
     view.slide = Math.min(view.slide, Math.max(0, deck.slides.length - 1));
     if (resetThumbnails) view.thumbnails.clear();
-    void view.panel.webview.postMessage({ type: 'render', slide: deck.slide(view.slide) || null, resetThumbnails });
+    void view.panel.webview.postMessage({ type: 'render', slide: deck.slide(view.slide) || null, resetThumbnails, selection });
+  }
+
+  insert(document, view, { index, kind, area }) {
+    if (index !== view.slide) return;
+    const deck = document.presentation;
+    const insertion = deck.prepareInsertion(index, kind, area);
+    if (!insertion) return;
+    const apply = (added, focus = false) => {
+      deck.applyInsertion(insertion, added);
+      const current = this.views.get(document);
+      if (!current) return;
+      if (current.slide === index) {
+        this.sendSlide(document, current, false, added ? { id: insertion.object.id, focus } : undefined);
+      } else if (current.thumbnails.has(index)) this.sendThumbnail(document, current, index);
+    };
+    apply(true, kind === 'text');
+    this.events.fire({
+      document, label: kind === 'text' ? 'Insert text box' : 'Insert shape',
+      undo: () => apply(false), redo: () => apply(true)
+    });
+  }
+
+  deleteObjects(document, view, { index, ids }) {
+    if (index !== view.slide) return;
+    const deck = document.presentation;
+    const deletion = deck.prepareDeletion(index, ids);
+    if (!deletion) return;
+    const apply = removed => {
+      deck.applyDeletion(deletion, removed);
+      const current = this.views.get(document);
+      if (!current) return;
+      if (current.slide === index) {
+        this.sendSlide(document, current, false, { objectIds: removed ? [] : deletion.objects.map(object => object.id) });
+      } else if (current.thumbnails.has(index)) this.sendThumbnail(document, current, index);
+    };
+    apply(true);
+    this.events.fire({
+      document, label: 'Delete PowerPoint objects', undo: () => apply(false), redo: () => apply(true)
+    });
   }
 
   sendThumbnail(document, view, index) {
@@ -236,26 +279,51 @@ function webviewHtml(webview, media) {
     '<link rel="stylesheet" href="' + asset('powerpoint.css') + '"><title>PowerPoint Editor</title></head>',
     '<body><header><div class="tool-group"><button id="undo" title="Undo" aria-label="Undo" type="button">↶</button>',
     '<button id="redo" title="Redo" aria-label="Redo" type="button">↷</button>',
+    '<select id="insert" aria-label="Insert shape or text box" disabled><option value="">Insert</option>',
+    '<option value="text">Text box</option><option value="rect">Rectangle</option><option value="roundRect">Rounded rectangle</option>',
+    '<option value="circle">Circle</option><option value="ellipse">Oval</option><option value="triangle">Triangle</option>',
+    '<option value="diamond">Diamond</option><option value="rightArrow">Right arrow</option></select>',
+    '<button id="select-objects" title="Select slide objects" aria-pressed="false" type="button" disabled>Select</button>',
+    '<button id="delete-objects" title="Delete selected objects" type="button" hidden>Delete</button>',
     '</div><nav id="formatting" aria-label="Text formatting">',
     '<div class="tool-group"><select id="family" aria-label="Font family"></select>',
-    '<input id="font" type="number" inputmode="decimal" min="1" max="400" step="any" placeholder="Size" title="Font size in points" aria-label="Font size in points"></div>',
+    '<input id="font" type="number" inputmode="decimal" min="1" max="400" step="any" placeholder="Size" title="Font size in points" aria-label="Font size in points">',
+    '<button id="font-grow" aria-label="Increase font size" title="Increase font size" type="button">A+</button>',
+    '<button id="font-shrink" aria-label="Decrease font size" title="Decrease font size" type="button">A−</button></div>',
     '<div class="tool-group"><button data-mark="bold" aria-label="Bold" title="Bold" type="button"><b>B</b></button>',
     '<button data-mark="italic" aria-label="Italic" title="Italic" type="button"><i>I</i></button>',
     '<button data-mark="underline" aria-label="Underline" title="Underline" type="button"><u>U</u></button>',
-    '<button data-mark="strike" aria-label="Strikethrough" title="Strikethrough" type="button"><s>S</s></button></div>',
+    '<button data-mark="strike" aria-label="Strikethrough" title="Strikethrough" type="button"><s>S</s></button>',
+    '<select id="baseline" aria-label="Superscript and subscript"><option value="normal">Baseline</option>',
+    '<option value="super">Superscript</option><option value="sub">Subscript</option></select></div>',
     '<div class="tool-group"><label for="color" class="color"><span>Text color</span><input id="color" type="color"></label>',
     '<label for="highlight" class="color"><span>Highlight</span><input id="highlight" type="color"></label>',
     '<select id="alignment" aria-label="Paragraph alignment"><option value="">Align</option><option value="l">Left</option>',
-    '<option value="ctr">Center</option><option value="r">Right</option><option value="just">Justify</option></select></div></nav>',
+    '<option value="ctr">Center</option><option value="r">Right</option><option value="just">Justify</option></select></div>',
+    '<div class="tool-group"><select id="list" aria-label="List style"><option value="">List</option>',
+    '<option value="none">No list</option><option value="bullet">Bullets</option><option value="number">Numbering</option></select>',
+    '<button id="indent-out" aria-label="Decrease indent" title="Decrease indent" type="button">⇤</button>',
+    '<button id="indent-in" aria-label="Increase indent" title="Increase indent" type="button">⇥</button>',
+    '<select id="spacing" aria-label="Line spacing"><option value="">Spacing</option><option value="1">1.0</option>',
+    '<option value="1.15">1.15</option><option value="1.5">1.5</option><option value="2">2.0</option></select></div></nav>',
     '<div class="actions"><button id="show-text" type="button" aria-expanded="false" aria-controls="inspector">Edit text</button>',
     '<button id="save" class="primary" type="button">Save</button></div></header>',
     '<p id="message" role="status">Loading presentation…</p>',
     '<main id="editor" hidden><nav id="navigator" aria-label="Slides">',
     '<div class="slide-controls"><button id="previous" type="button" aria-label="Previous slide">‹</button>',
     '<span id="slide-count" aria-live="polite"></span><button id="next" type="button" aria-label="Next slide">›</button></div>',
-    '<ol id="thumbnails"></ol></nav><div id="stage"><div id="slide" aria-label="Slide preview"></div></div>',
-    '<aside id="inspector" hidden><label for="objects">Text object</label><select id="objects"></select><div id="fields"></div></aside></main>',
+    '<ol id="thumbnails"></ol></nav><div id="stage"><div id="stage-surface"><div id="slide" tabindex="-1" aria-label="Slide preview"></div></div></div>',
+    '<aside id="inspector" hidden><label for="objects">Text object</label><select id="objects"></select><div id="fields"></div></aside>',
+    '<aside id="object-panel" aria-label="Slide objects" hidden><div class="object-panel-heading"><h2>Objects</h2>',
+    '<span id="selection-count" aria-live="polite"></span></div><div id="object-options"></div></aside></main>',
+    '<footer id="zoom-controls" aria-label="Slide zoom" hidden>',
+    '<button id="zoom-fit" title="Fit slide to window" type="button">Fit</button>',
+    '<button id="zoom-actual" title="Reset to 100%" type="button">100%</button>',
+    '<button id="zoom-out" aria-label="Zoom out" title="Zoom out" type="button">−</button>',
+    '<input id="zoom-slider" aria-label="Zoom percentage" type="range" min="10" max="400" value="100">',
+    '<button id="zoom-in" aria-label="Zoom in" title="Zoom in" type="button">+</button></footer>',
     '<script nonce="' + nonce + '" src="' + asset('powerpoint-inline.js') + '"></script>',
+    '<script nonce="' + nonce + '" src="' + asset('heading-shortcuts.js') + '"></script>',
     '<script nonce="' + nonce + '" src="' + asset('powerpoint.js') + '"></script></body></html>'
   ].join('\n');
 }

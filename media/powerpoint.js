@@ -1,4 +1,4 @@
-/* global acquireVsCodeApi, createInlineEditor */
+/* global acquireVsCodeApi, createInlineEditor, headingLevelForShortcut */
 'use strict';
 
 const vscode = acquireVsCodeApi();
@@ -6,12 +6,21 @@ const get = id => document.getElementById(id);
 const editor = get('editor');
 const stage = get('stage');
 const preview = get('slide');
+const zoomSlider = get('zoom-slider');
+const minZoom = Number(zoomSlider.min);
+const maxZoom = Number(zoomSlider.max);
+const emuPerPixel = 9525;
 const thumbnails = get('thumbnails');
 const objects = get('objects');
 const fields = get('fields');
 const message = get('message');
 const inspector = get('inspector');
 const formatting = get('formatting');
+const insertPicker = get('insert');
+const objectPanel = get('object-panel');
+const objectOptions = get('object-options');
+const selectButton = get('select-objects');
+const deleteButton = get('delete-objects');
 const marks = [...formatting.querySelectorAll('[data-mark]')];
 const families = ['Arial', 'Aptos', 'Calibri', 'Georgia', 'Microsoft YaHei', 'Noto Sans CJK SC', 'SimSun', 'Times New Roman', 'Verdana'];
 const canvasObjects = new Map();
@@ -26,6 +35,12 @@ let selected;
 let selectedCell;
 let selectedField;
 let inlineKeys = [];
+let manualZoom;
+let displayedZoom = 100;
+let placement;
+let lastInsert = 0;
+let objectMode = false;
+const selectedObjects = new Set();
 
 const inline = createInlineEditor(preview, {
   select(host, keys) {
@@ -38,6 +53,7 @@ const inline = createInlineEditor(preview, {
     refreshToolbar();
   },
   deselect() {
+    if (objectMode) return;
     inline.clear();
     selectObject(undefined);
   },
@@ -56,17 +72,239 @@ function status(text) {
 
 function resize() {
   if (!slide) return;
-  const width = Math.min(stage.clientWidth - 24, (stage.clientHeight - 24) * slide.width / slide.height);
+  const actualWidth = slide.width / emuPerPixel;
+  const fitWidth = Math.min(stage.clientWidth - 24, (stage.clientHeight - 24) * slide.width / slide.height);
+  const width = manualZoom === undefined ? fitWidth : actualWidth * manualZoom / 100;
   preview.style.width = Math.max(1, width) + 'px';
+  displayedZoom = manualZoom ?? Math.max(1, Math.round(width / actualWidth * 100));
+  zoomSlider.value = String(displayedZoom);
+  zoomSlider.setAttribute('aria-valuetext', displayedZoom + '%');
+  get('zoom-actual').textContent = displayedZoom + '%';
+  get('zoom-actual').setAttribute('aria-label', 'Current zoom ' + displayedZoom + '%, reset to 100%');
+  get('zoom-fit').setAttribute('aria-pressed', String(manualZoom === undefined));
+  get('zoom-out').disabled = displayedZoom <= minZoom;
+  get('zoom-in').disabled = displayedZoom >= maxZoom;
 }
 
 new ResizeObserver(resize).observe(stage);
 
+function setZoom(value, anchor) {
+  if (!slide) return;
+  const viewport = stage.getBoundingClientRect();
+  const point = anchor || { x: viewport.left + stage.clientWidth / 2, y: viewport.top + stage.clientHeight / 2 };
+  const before = preview.getBoundingClientRect();
+  const x = Math.max(0, Math.min(1, (point.x - before.left) / before.width));
+  const y = Math.max(0, Math.min(1, (point.y - before.top) / before.height));
+  manualZoom = Math.max(minZoom, Math.min(maxZoom, value));
+  resize();
+  const after = preview.getBoundingClientRect();
+  stage.scrollLeft += after.left + after.width * x - point.x;
+  stage.scrollTop += after.top + after.height * y - point.y;
+}
+
+get('zoom-fit').addEventListener('click', () => {
+  manualZoom = undefined;
+  resize();
+  stage.scrollTo(0, 0);
+});
+get('zoom-actual').addEventListener('click', () => setZoom(100));
+get('zoom-out').addEventListener('click', () => setZoom(displayedZoom - 10));
+get('zoom-in').addEventListener('click', () => setZoom(displayedZoom + 10));
+zoomSlider.addEventListener('input', () => setZoom(zoomSlider.valueAsNumber));
+stage.addEventListener('wheel', event => {
+  if (!(event.ctrlKey || event.metaKey) || !event.deltaY) return;
+  event.preventDefault();
+  setZoom(displayedZoom + (event.deltaY < 0 ? 10 : -10), { x: event.clientX, y: event.clientY });
+}, { passive: false });
+
 function switchSlide(index) {
   if (!slide || index < 0 || index >= slide.count || index === slide.index) return;
+  cancelInsertion();
   renderThumbnail(slide);
   vscode.postMessage({ type: 'slide', index });
 }
+
+function stopPlacement() {
+  if (placement && preview.hasPointerCapture(placement.pointer)) preview.releasePointerCapture(placement.pointer);
+  placement?.guide.remove();
+  placement = undefined;
+}
+
+function cancelInsertion() {
+  stopPlacement();
+  insertPicker.value = '';
+  delete preview.dataset.drawing;
+}
+
+function refreshObjectSelection() {
+  for (const [id, element] of canvasObjects) {
+    element.inert = objectMode;
+    element.classList.toggle('object-selected', objectMode && selectedObjects.has(id));
+  }
+  for (const checkbox of objectOptions.querySelectorAll('input')) {
+    checkbox.checked = selectedObjects.has(Number(checkbox.value));
+  }
+  deleteButton.disabled = !selectedObjects.size;
+  get('selection-count').textContent = selectedObjects.size + ' selected';
+}
+
+function showObjects() {
+  objectOptions.replaceChildren();
+  if (!objectMode || !slide) return;
+  for (const object of slide.objects) {
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = String(object.id);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) selectedObjects.add(object.id);
+      else selectedObjects.delete(object.id);
+      refreshObjectSelection();
+    });
+    const name = document.createElement('span');
+    name.textContent = object.label;
+    name.title = object.label;
+    const details = [object.hidden && 'Hidden', object.emptyText && 'Empty text box', !object.box && 'No outline'].filter(Boolean);
+    if (details.length) {
+      const note = document.createElement('small');
+      note.textContent = details.join(' · ');
+      name.append(note);
+    }
+    label.append(checkbox, name);
+    objectOptions.append(label);
+  }
+}
+
+function setObjectMode(enabled) {
+  if (objectMode === enabled) return;
+  stopPlacement();
+  objectMode = enabled;
+  selectedObjects.clear();
+  preview.toggleAttribute('data-selecting', enabled);
+  objectPanel.hidden = !enabled;
+  deleteButton.hidden = !enabled;
+  selectButton.setAttribute('aria-pressed', String(enabled));
+  if (enabled) {
+    cancelInsertion();
+    setInspector(false);
+    inline.clear();
+    selectObject(undefined);
+    preview.focus({ preventScroll: true });
+  }
+  editor.classList.toggle('with-inspector', enabled || !inspector.hidden);
+  showObjects();
+  refreshObjectSelection();
+  resize();
+}
+
+function selectArea(area, additive) {
+  const slideBox = preview.getBoundingClientRect();
+  const left = slideBox.left + area.x * slideBox.width;
+  const top = slideBox.top + area.y * slideBox.height;
+  const right = left + area.w * slideBox.width;
+  const bottom = top + area.h * slideBox.height;
+  const items = [...canvasObjects.entries()].map(([id, node]) => ({ id, box: node.getBoundingClientRect() }));
+  if (!additive) selectedObjects.clear();
+  if (!area.w && !area.h) {
+    const item = items.reverse().find(({ box }) => left >= box.left && left <= box.right && top >= box.top && top <= box.bottom);
+    if (item) {
+      if (additive && selectedObjects.has(item.id)) selectedObjects.delete(item.id);
+      else selectedObjects.add(item.id);
+    }
+  } else {
+    for (const { id, box } of items) {
+      if (box.left >= left - 1 && box.top >= top - 1 && box.right <= right + 1 && box.bottom <= bottom + 1) selectedObjects.add(id);
+    }
+  }
+  refreshObjectSelection();
+}
+
+function deleteObjects() {
+  if (!objectMode || !slide || !selectedObjects.size) return;
+  vscode.postMessage({ type: 'deleteObjects', index: slide.index, ids: [...selectedObjects] });
+}
+
+selectButton.addEventListener('click', () => setObjectMode(!objectMode));
+deleteButton.addEventListener('click', deleteObjects);
+
+function slidePoint(event) {
+  const box = preview.getBoundingClientRect();
+  const clamp = value => Math.min(1, Math.max(0, value));
+  return { x: clamp((event.clientX - box.left) / box.width), y: clamp((event.clientY - box.top) / box.height) };
+}
+
+function placementArea(from, to) {
+  const w = Math.abs(to.x - from.x);
+  const h = Math.abs(to.y - from.y);
+  if (w * preview.clientWidth < 4 && h * preview.clientHeight < 4) return { ...from, w: 0, h: 0 };
+  return { x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), w, h };
+}
+
+function insertAt(kind, area) {
+  if (!slide) return;
+  lastInsert = Date.now();
+  vscode.postMessage({ type: 'insert', index: slide.index, kind, area });
+}
+
+insertPicker.addEventListener('change', () => {
+  if (insertPicker.value) {
+    setObjectMode(false);
+    preview.dataset.drawing = insertPicker.value;
+  } else cancelInsertion();
+});
+preview.addEventListener('pointerdown', event => {
+  if ((!insertPicker.value && !objectMode) || event.button !== 0 || placement) return;
+  event.preventDefault();
+  if (objectMode) preview.focus({ preventScroll: true });
+  preview.setPointerCapture(event.pointerId);
+  const guide = document.createElement('span');
+  guide.className = objectMode ? 'placement-guide marquee' : 'placement-guide';
+  guide.dataset.geometry = insertPicker.value === 'circle' ? 'ellipse' : insertPicker.value;
+  preview.append(guide);
+  placement = { from: slidePoint(event), guide, pointer: event.pointerId };
+});
+preview.addEventListener('pointermove', event => {
+  if (placement?.pointer !== event.pointerId) return;
+  const box = placementArea(placement.from, slidePoint(event));
+  if (insertPicker.value === 'circle' && slide) {
+    const length = Math.min(box.w * slide.width, box.h * slide.height);
+    box.w = length / slide.width;
+    box.h = length / slide.height;
+  }
+  Object.assign(placement.guide.style, {
+    left: box.x * 100 + '%', top: box.y * 100 + '%', width: box.w * 100 + '%', height: box.h * 100 + '%'
+  });
+});
+preview.addEventListener('pointerup', event => {
+  if (placement?.pointer !== event.pointerId) return;
+  const kind = insertPicker.value;
+  const area = placementArea(placement.from, slidePoint(event));
+  if (objectMode) {
+    stopPlacement();
+    selectArea(area, event.shiftKey);
+    return;
+  }
+  cancelInsertion();
+  insertAt(kind, area);
+});
+preview.addEventListener('pointercancel', cancelInsertion);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && insertPicker.value) cancelInsertion();
+  if (!objectMode) return;
+  if (event.key === 'Escape') {
+    setObjectMode(false);
+    selectButton.focus();
+  } else if (event.key === 'Delete' &&
+      (document.activeElement === preview || document.activeElement === deleteButton || objectPanel.contains(document.activeElement))) {
+    event.preventDefault();
+    deleteObjects();
+  }
+});
+preview.addEventListener('dblclick', event => {
+  if (objectMode || event.button !== 0 || insertPicker.value || Date.now() - lastInsert < 350 || event.target.closest('[data-inline-editor]')) return;
+  event.preventDefault();
+  insertAt('text', { ...slidePoint(event), w: 0, h: 0 });
+});
 
 get('previous').addEventListener('click', () => switchSlide(slide.index - 1));
 get('next').addEventListener('click', () => switchSlide(slide.index + 1));
@@ -182,7 +420,7 @@ function commonStyle(targets, property) {
 function refreshToolbar() {
   const targets = formatTargets();
   for (const element of formatting.querySelectorAll('button, select, input')) element.disabled = !targets.length;
-  get('show-text').disabled = !selectedObject();
+  get('show-text').disabled = !getParts(selectedObject()?.paragraphs || []).length;
   const family = get('family');
   const typeface = commonStyle(targets, 'family');
   if (typeface && ![...family.options].some(option => option.value === typeface)) {
@@ -191,6 +429,9 @@ function refreshToolbar() {
   family.value = typeface || '';
   get('font').value = commonStyle(targets, 'font') ?? '';
   get('alignment').value = commonStyle(targets, 'alignment') || '';
+  get('baseline').value = commonStyle(targets, 'baseline') || 'normal';
+  get('list').value = commonStyle(targets, 'list') || '';
+  get('spacing').value = commonStyle(targets, 'spacing') ?? '';
   get('color').value = commonStyle(targets, 'color') || '#17202b';
   get('highlight').value = commonStyle(targets, 'highlight') || '#fff19a';
   for (const mark of marks) {
@@ -205,6 +446,16 @@ function format(property, value) {
   if (keys.length) vscode.postMessage({ type: 'format', keys, property, value });
 }
 
+document.addEventListener('keydown', event => {
+  const level = headingLevelForShortcut(event);
+  if (!level || objectMode) return;
+  const keys = inline.current()?.keys || (event.target.matches?.('#fields textarea') && selectedField ? [selectedField] : []);
+  if (!keys.length) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!event.repeat) vscode.postMessage({ type: 'format', keys, property: 'heading', value: level });
+}, true);
+
 function toggleMark(property) {
   const enabled = commonStyle(formatTargets(), property) === true;
   format(property, !enabled);
@@ -212,9 +463,11 @@ function toggleMark(property) {
 
 get('family').add(new Option('Font', ''));
 for (const name of families) get('family').add(new Option(name, name));
-for (const property of ['family', 'alignment', 'color', 'highlight']) {
+for (const property of ['family', 'alignment', 'color', 'highlight', 'baseline', 'list', 'spacing']) {
   const input = get(property);
-  input.addEventListener('change', () => { if (input.value) format(property, input.value); });
+  input.addEventListener('change', () => {
+    if (input.value) format(property, property === 'spacing' ? Number(input.value) : input.value);
+  });
 }
 get('font').addEventListener('change', event => {
   if (event.target.value && event.target.validity.valid) format('font', event.target.valueAsNumber);
@@ -224,10 +477,21 @@ for (const mark of marks) {
   mark.addEventListener('mousedown', event => event.preventDefault());
   mark.addEventListener('click', () => toggleMark(mark.dataset.mark));
 }
+for (const [id, property, change, min, max] of [
+  ['font-grow', 'font', 2, 1, 400], ['font-shrink', 'font', -2, 1, 400],
+  ['indent-in', 'indent', 1, 0, 8], ['indent-out', 'indent', -1, 0, 8]
+]) {
+  const button = get(id);
+  button.addEventListener('mousedown', event => event.preventDefault());
+  button.addEventListener('click', () => {
+    const base = formatTargets()[0]?.style[property];
+    if (base !== undefined) format(property, Math.max(min, Math.min(max, base + change)));
+  });
+}
 
 function setInspector(open, focus = false) {
   inspector.hidden = !open;
-  editor.classList.toggle('with-inspector', open);
+  editor.classList.toggle('with-inspector', open || objectMode);
   get('show-text').setAttribute('aria-expanded', String(open));
   if (open && focus) fields.querySelector('textarea')?.focus();
   if (!open && selectedField) {
@@ -240,17 +504,35 @@ get('show-text').addEventListener('click', () => setInspector(inspector.hidden, 
 
 function writeParagraphs(container, paragraphs, model) {
   const editing = container.hasAttribute('data-inline-editor');
+  let numbering = 0;
   const elements = paragraphs.map(line => {
     const paragraph = document.createElement('span');
     paragraph.className = 'paragraph';
-    const alignment = line.find(part => part.style)?.style.alignment;
-    paragraph.style.textAlign = { ctr: 'center', r: 'right', just: 'justify' }[alignment] || '';
+    const layout = line.find(part => part.style)?.style;
+    if (layout) {
+      paragraph.style.textAlign = { ctr: 'center', r: 'right', just: 'justify' }[layout.alignment] || '';
+      paragraph.style.lineHeight = String(layout.spacing * 1.2);
+      const listed = layout.list !== 'none';
+      const indent = layout.indent * 342900 + (listed ? 285750 : 0);
+      if (indent) paragraph.style.paddingInlineStart = indent / model.width * 100 + 'cqw';
+      numbering = layout.list === 'number' ? numbering + 1 : 0;
+      if (listed) {
+        const marker = document.createElement('span');
+        marker.className = 'paragraph-marker';
+        marker.textContent = numbering ? numbering + '.' : '•';
+        marker.style.insetInlineStart = layout.indent * 342900 / model.width * 100 + 'cqw';
+        marker.contentEditable = 'false';
+        marker.setAttribute('aria-hidden', 'true');
+        paragraph.append(marker);
+      }
+    } else numbering = 0;
     for (const part of line) {
       const span = document.createElement('span');
       const style = part.style;
       if (style) {
         if (style.family) span.style.fontFamily = JSON.stringify(style.family) + ', sans-serif';
-        if (style.font) span.style.fontSize = style.font * 12700 / model.width * 100 + 'cqw';
+        if (style.font) span.style.fontSize = style.font * 12700 / model.width * (style.baseline === 'normal' ? 100 : 70) + 'cqw';
+        if (style.baseline !== 'normal') span.style.verticalAlign = style.baseline;
         if (style.bold) span.style.fontWeight = '700';
         if (style.italic) span.style.fontStyle = 'italic';
         span.style.textDecorationLine = [style.underline && 'underline', style.strike && 'line-through'].filter(Boolean).join(' ');
@@ -294,10 +576,11 @@ function updateObject(item, object, model) {
 
 function drawObject(object, model, thumbnail = false) {
   const { box } = object;
-  if (!box) return;
-  const image = object.type === 'image' && object.image && (!thumbnail || object.image.length <= 66 * 1024);
+  if (!box || (thumbnail && object.hidden)) return;
+  const image = object.type === 'image' && !object.hidden && object.image && (!thumbnail || object.image.length <= 66 * 1024);
   const item = document.createElement(image ? 'img' : 'span');
   item.className = 'object ' + object.type;
+  if (object.hidden) item.classList.add('hidden-object');
   item.style.left = box.x / model.width * 100 + '%';
   item.style.top = box.y / model.height * 100 + '%';
   item.style.width = box.w / model.width * 100 + '%';
@@ -322,7 +605,9 @@ function drawObject(object, model, thumbnail = false) {
       item.append(element);
     }
   } else {
-    if (object.fill) item.style.backgroundColor = object.fill;
+    if (object.geometry) item.dataset.geometry = object.geometry;
+    if (object.fill) item.style.setProperty('--shape-fill', object.fill);
+    if (object.stroke) item.style.setProperty('--shape-stroke', object.stroke);
     if (object.font) item.style.fontSize = object.font * 12700 / model.width * 100 + 'cqw';
     if (!thumbnail && getParts(object.paragraphs).length) makeEditable(item, object.id, object.label);
   }
@@ -437,18 +722,23 @@ function selectObject(id, cellIndex) {
 
 objects.addEventListener('change', () => selectObject(Number(objects.value)));
 
-function display(next, resetThumbnails) {
+function display(next, resetThumbnails, selection) {
   const sameSlide = next && slide && next.index === slide.index;
   const navigatorFocused = thumbnails.contains(document.activeElement);
   slide = next;
+  insertPicker.disabled = !slide;
+  selectButton.disabled = !slide;
   editor.hidden = !slide;
+  get('zoom-controls').hidden = !slide;
   get('previous').disabled = !slide || slide.index === 0;
   get('next').disabled = !slide || slide.index === slide.count - 1;
   if (!slide) {
+    setObjectMode(false);
     status('This presentation contains no slides.');
     refreshToolbar();
     return;
   }
+  if (!sameSlide || resetThumbnails) selectedObjects.clear();
   status('');
   if (resetThumbnails || thumbnails.children.length !== slide.count) createThumbnails(slide.count);
   get('slide-count').textContent = (slide.index + 1) + ' / ' + slide.count;
@@ -463,6 +753,7 @@ function display(next, resetThumbnails) {
   if (navigatorFocused) button.focus({ preventScroll: true });
   renderThumbnail(slide);
   inline.clear();
+  cancelInsertion();
   preview.replaceChildren();
   preview.style.aspectRatio = slide.width + ' / ' + slide.height;
   preview.style.backgroundColor = slide.background || '#fff';
@@ -476,17 +767,38 @@ function display(next, resetThumbnails) {
     canvasObjects.set(object.id, element);
     preview.append(element);
   }
-  const choices = slide.objects.filter(object => getParts(object.paragraphs).length);
+  const choices = slide.objects.filter(object => !object.hidden && getParts(object.paragraphs).length);
   objects.replaceChildren();
   for (const object of choices) objects.add(new Option(object.label, object.id));
   objects.disabled = choices.length === 0;
   const previous = sameSlide && choices.some(object => object.id === selected);
-  selectObject(previous ? selected : choices[0]?.id, previous ? selectedCell : undefined);
+  selectObject(objectMode ? undefined : previous ? selected : choices[0]?.id, previous ? selectedCell : undefined);
   resize();
+  if (objectMode) {
+    const available = new Set(slide.objects.map(object => object.id));
+    for (const id of selectedObjects) if (!available.has(id)) selectedObjects.delete(id);
+    if (selection?.objectIds) {
+      selectedObjects.clear();
+      for (const id of selection.objectIds) if (available.has(id)) selectedObjects.add(id);
+    }
+    showObjects();
+    refreshObjectSelection();
+  }
+  if (selection?.id !== undefined) {
+    selectObject(selection.id);
+    if (selection.focus) {
+      const host = canvasObjects.get(selection.id);
+      const first = host?.querySelector('[data-text-key]')?.firstChild;
+      if (first) {
+        host.focus({ preventScroll: true });
+        document.getSelection().setPosition(first, 0);
+      }
+    }
+  }
 }
 
 window.addEventListener('message', ({ data }) => {
-  if (data.type === 'render') display(data.slide, data.resetThumbnails);
+  if (data.type === 'render') display(data.slide, data.resetThumbnails, data.selection);
   else if (data.type === 'thumbnail') {
     if (data.slide.index !== slide?.index) renderThumbnail(data.slide);
   } else if (data.type === 'error') status(data.message);

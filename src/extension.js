@@ -5,9 +5,18 @@ const { diffChars } = require('diff');
 const { parseSource, escapeAttribute } = require('./html');
 const { printDocument } = require('./print');
 const { registerPowerPoint } = require('./powerpoint');
+const defaultHtmlZoom = 85;
+const defaultOutlineDepth = 3;
+const outlineDepths = [6, 1, 2, 3, 4];
+const outlineDepthKey = 'htmlDesign.outlineDepth';
 
 function activate(context) {
   registerPowerPoint(context);
+  context.subscriptions.push(vscode.window.registerCustomEditorProvider('fileEditor.html', {
+    resolveCustomTextEditor(document, panel) {
+      openDesign(context, document, panel);
+    }
+  }, { webviewOptions: { retainContextWhenHidden: true } }));
   const panels = new Map();
   context.subscriptions.push(vscode.commands.registerCommand('htmlDesign.open', async () => {
     const document = vscode.window.activeTextEditor?.document;
@@ -28,23 +37,20 @@ function activate(context) {
   context.subscriptions.push({ dispose: () => panels.forEach(panel => panel.dispose()) });
 }
 
-function openDesign(context, initialDocument) {
+function openDesign(context, initialDocument, panel) {
   const uri = initialDocument.uri;
   const uriKey = uri.toString();
   const filename = path.posix.basename(uri.path) || initialDocument.fileName;
   const directory = initialDocument.isUntitled ? undefined : vscode.Uri.joinPath(uri, '..');
   const workspace = vscode.workspace.getWorkspaceFolder(uri)?.uri;
   const media = vscode.Uri.joinPath(context.extensionUri, 'media');
-  const panel = vscode.window.createWebviewPanel(
-    'htmlDesign', 'Design · ' + filename, vscode.ViewColumn.Beside,
-    {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [media, directory, workspace].filter(Boolean)
-    }
-  );
+  const webviewOptions = { enableScripts: true, localResourceRoots: [media, directory, workspace].filter(Boolean) };
+  if (panel) panel.webview.options = webviewOptions;
+  else panel = vscode.window.createWebviewPanel('htmlDesign', 'Design · ' + filename, vscode.ViewColumn.Beside,
+    { ...webviewOptions, retainContextWhenHidden: true });
   const webview = panel.webview;
   const baseUrl = directory ? webview.asWebviewUri(directory).toString().replace(/\/$/, '') + '/' : undefined;
+  const documentUrl = directory ? webview.asWebviewUri(uri).toString() : undefined;
   const config = () => vscode.workspace.getConfiguration('htmlDesign', uri).get('syncDelay', 300);
   const post = message => webview.postMessage(message);
   let active = true;
@@ -58,7 +64,7 @@ function openDesign(context, initialDocument) {
   function sendDocument(document, type = 'snapshot', unchanged) {
     return post({
       type, version: document.version, html: parseSource(document.getText()),
-      baseUrl, filename, unchanged, delay: config()
+      baseUrl, documentUrl, filename, unchanged, delay: config()
     });
   }
 
@@ -78,11 +84,17 @@ function openDesign(context, initialDocument) {
           await sendDocument(await documentNow(), message.type === 'reload' ? 'reload' : 'snapshot');
         } else if (message.type === 'edit') {
           await applyDesign(message);
+        } else if (message.type === 'save') {
+          const document = await documentNow();
+          if (!document.isUntitled) await document.save();
+          else await vscode.commands.executeCommand('workbench.action.files.save');
         } else if (message.type === 'print') {
           const document = await documentNow();
           await printDocument(document, workspace);
         } else if (message.type === 'fullscreen') {
           await vscode.commands.executeCommand('workbench.action.toggleMaximizeEditorGroup');
+        } else if (message.type === 'outlineDepth' && outlineDepths.includes(message.depth)) {
+          await context.globalState.update(outlineDepthKey, message.depth);
         }
       } catch (error) {
         if (!active) return;
@@ -95,7 +107,7 @@ function openDesign(context, initialDocument) {
     active = false;
     subscriptions.forEach(item => item.dispose());
   });
-  webview.html = shell(webview, media);
+  webview.html = shell(webview, media, context.globalState.get(outlineDepthKey, defaultOutlineDepth));
   return panel;
 
   function acknowledge(document, raw) {
@@ -165,7 +177,7 @@ function openDesign(context, initialDocument) {
   }
 }
 
-function shell(webview, media) {
+function shell(webview, media, outlineDepth) {
   const nonce = randomBytes(18).toString('base64');
   const asset = filename => escapeAttribute(webview.asWebviewUri(vscode.Uri.joinPath(media, filename)).toString());
   const source = webview.cspSource;
@@ -178,12 +190,30 @@ function shell(webview, media) {
       ' https: http: data: blob:; frame-src about:; base-uri ' + source + ' https: http:;">',
     '<link rel="stylesheet" href="' + asset('design.css') + '"><title>HTML Design View</title></head>',
     '<body data-resource-origin="' + escapeAttribute(source) + '">',
-    '<nav id="tools" aria-label="Formatting"></nav>',
+    '<nav id="tools" aria-label="Formatting"><div class="tool-group">',
+    '<button id="outline-toggle" type="button" aria-controls="outline" aria-expanded="true" aria-label="Hide document outline" title="Hide document outline">',
+    '<span class="outline-icon" aria-hidden="true"></span></button>',
+    '<label class="outline-depth-control" title="Filter outline by heading level">',
+    '<span class="outline-depth-icon" aria-hidden="true"></span><span class="outline-depth-caption" aria-hidden="true"></span>',
+    '<select id="outline-depth" aria-label="Highest heading level shown in the outline" aria-controls="outline">',
+    ...outlineDepths.map((level, index) => '<option value="' + level + '"' + (level === outlineDepth ? ' selected' : '') + '>' +
+      (index === 0 ? 'All headings' : 'H' + level) + '</option>'),
+    '</select></label></div></nav>',
     '<aside id="conflict" hidden><span>The HTML source changed while you were editing. Copy your draft before reloading if you want to keep it.</span>',
     '<button id="copy" type="button">Copy draft</button><button id="reload" type="button">Reload source</button></aside>',
-    '<main id="canvas" aria-label="Design canvas"></main>',
-    '<footer><div class="file"><strong>Design View</strong><span id="filename"></span></div>',
+    '<div class="design-workspace">',
+    '<nav id="outline" aria-label="Document outline">',
+    '<div class="outline-scroll"><p id="outline-empty">No headings to show</p><ul id="outline-entries" class="outline-list"></ul></div></nav>',
+    '<div id="outline-divider" role="separator" tabindex="0" aria-label="Outline width" aria-orientation="vertical" aria-controls="outline" title="Drag to resize the outline"></div>',
+    '<main id="canvas" aria-label="Design canvas"></main></div>',
+    '<footer><span id="filename"></span>',
     '<div class="document-status"><span id="breadcrumb" aria-label="Element path">body</span><span id="status" role="status">Loading…</span></div>',
+    '<div class="zoom-controls" role="group" aria-label="Page zoom">',
+    '<button id="zoom-out" type="button" aria-label="Zoom out">−</button>',
+    '<input id="zoom-slider" type="range" min="50" max="300" value="' + defaultHtmlZoom + '" aria-label="Page zoom" aria-valuetext="' + defaultHtmlZoom + '%">',
+    '<button id="zoom-in" type="button" aria-label="Zoom in">+</button>',
+    '<input id="zoom-actual" type="text" inputmode="numeric" aria-label="Page zoom percentage" title="Enter a zoom percentage" value="' + defaultHtmlZoom + '%">',
+    '<button id="zoom-reset" class="compact-tool" type="button" aria-label="Reset zoom to ' + defaultHtmlZoom + '%" title="Reset zoom to ' + defaultHtmlZoom + '%">↺</button></div>',
     '<div class="actions"><button id="source" type="button">HTML</button>',
     '<button id="fullscreen" type="button" title="Toggle between full screen and split view">Full screen</button><button id="print" type="button">Print / PDF</button></div></footer>',
     '<dialog id="dialog"><form method="dialog"><h2 id="dialog-title"></h2><div id="fields"></div>',
@@ -191,6 +221,8 @@ function shell(webview, media) {
     '</form></dialog>',
     '<script nonce="' + nonce + '" src="' + asset('source-tree.js') + '"></script>',
     '<script nonce="' + nonce + '" src="' + asset('resources.js') + '"></script>',
+    '<script nonce="' + nonce + '" src="' + asset('heading-shortcuts.js') + '"></script>',
+    '<script nonce="' + nonce + '" src="' + asset('html-outline.js') + '"></script>',
     '<script nonce="' + nonce + '" src="' + asset('design.js') + '"></script></body></html>'
   ].join('\n');
 }
